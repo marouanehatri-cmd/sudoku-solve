@@ -555,7 +555,7 @@ const CV = {
     }
     return out;
   },
-  adaptive(g,w,h,block,C){        // ADAPTIVE_THRESH_GAUSSIAN_C, THRESH_BINARY_INV  (ink = 1)
+  adaptive(g,w,h,block,C,both){   // ADAPTIVE_THRESH_GAUSSIAN_C, THRESH_BINARY_INV  (ink = 1); both=true also marks lighter-than-local pixels
     const sigma=0.3*((block-1)*0.5-1)+0.8, r=(block-1)>>1, k=new Float32Array(block); let ks=0;
     for(let i=0;i<block;i++){ const d=i-r; k[i]=Math.exp(-d*d/(2*sigma*sigma)); ks+=k[i]; }
     for(let i=0;i<block;i++) k[i]/=ks;
@@ -564,7 +564,7 @@ const CV = {
       for(let j=-r;j<=r;j++){ let xx=x+j; if(xx<0)xx=0; else if(xx>=w)xx=w-1; s+=k[j+r]*g[row+xx]; } t[row+x]=s; } }
     for(let y=0;y<h;y++){ for(let x=0;x<w;x++){ let s=0;
       for(let j=-r;j<=r;j++){ let yy=y+j; if(yy<0)yy=0; else if(yy>=h)yy=h-1; s+=k[j+r]*t[yy*w+x]; }
-      out[y*w+x]= g[y*w+x] <= s-C ? 1 : 0; } }
+      const dv=g[y*w+x]-s; out[y*w+x]= both ? ((dv>C||dv<-C)?1:0) : (dv<=-C?1:0); } }
     return out;
   },
   label(bin,w,h){                  // 8-connected components
@@ -681,26 +681,40 @@ function classify(feat){
 
 /* ---- full pipeline ---- */
 const SIZE=450, CONF_CELL=0.6, CONF_LOW=0.7;
-function readGrid(img){
-  const t0=performance.now(), w=img.width, h=img.height;
-  let g=CV.gray(img);
-  const avg=CV.mean(g);
-  if(avg<80){ for(let i=0;i<g.length;i++){ const v=g[i]*1.3+40; g[i]=v>255?255:v; } }     // low light boost
-  g=CV.blur3(g,w,h);
-  g=CV.clahe(g,w,h,2.0,8);
-  const bin=CV.adaptive(g,w,h,11,2);
-  const {comps}=CV.label(bin,w,h);
-  // find the grid: big, roughly square connected component
-  const minDim=Math.min(w,h); let best=null,bestScore=0;
-  for(let i=1;i<comps.length;i++){ const c=comps[i], bw=c.maxx-c.minx+1, bh=c.maxy-c.miny+1;
-    if(bw<minDim*0.3||bh<minDim*0.3) continue;
-    const sq=Math.min(bw,bh)/Math.max(bw,bh); if(sq<0.6) continue;
-    const sc=c.count*sq*sq; if(sc>bestScore){ bestScore=sc; best=c; } }
-  if(!best) return {ok:false,reason:'grid',ms:performance.now()-t0,avg};
-  const src=[[best.tlx,best.tly],[best.trx,best.try_],[best.brx,best.bry],[best.blx,best.bly]];
-  const S=SIZE, H=CV.homography([[0,0],[S,0],[S,S],[0,S]],src);
-  const wg=CV.warp(g,w,h,H,S);
-  const ink=CV.adaptive(CV.blur3(wg,S,S),S,S,25,3);
+/* find the 4 corners of the grid (works for dark lines, light lines, or both) */
+function findGrid(g,w,h,mode){                             // mode true = lines of any colour, false = dark lines only
+  const minDim=Math.min(w,h);
+  {
+    const bin=CV.adaptive(g,w,h,11,mode?5:2,mode), {comps}=CV.label(bin,w,h);
+    let best=null,bestScore=0;
+    for(let i=1;i<comps.length;i++){ const c=comps[i], bw=c.maxx-c.minx+1, bh=c.maxy-c.miny+1;
+      if(bw<minDim*0.3||bh<minDim*0.3) continue;
+      const sq=Math.min(bw,bh)/Math.max(bw,bh); if(sq<0.6) continue;
+      const q=[[c.tlx,c.tly],[c.trx,c.try_],[c.brx,c.bry],[c.blx,c.bly]];
+      const sides=[0,1,2,3].map(k=>Math.hypot(q[(k+1)%4][0]-q[k][0],q[(k+1)%4][1]-q[k][1]));
+      if(Math.min(...sides)/Math.max(...sides)<0.6) continue;           // not a square-ish quad
+      const sc=c.count*sq*sq; if(sc>bestScore){ bestScore=sc; best=q; } }
+    if(best) return best;
+  }
+  return null;
+}
+/* true when digits are lighter than their background (dark-mode screenshots) */
+function digitsAreLight(wg,S){
+  const cs=S/9, m=Math.round(cs*0.11), hist=new Int32Array(256); let light=0, dark=0;
+  for(let r=0;r<9;r++) for(let c=0;c<9;c++){
+    const x0=Math.round(c*cs)+m, y0=Math.round(r*cs)+m, x1=Math.round((c+1)*cs)-m, y1=Math.round((r+1)*cs)-m;
+    hist.fill(0); let n=0;
+    for(let y=y0;y<y1;y++) for(let x=x0;x<x1;x++){ hist[wg[y*S+x]]++; n++; }
+    let acc=0, med=0; for(let v=0;v<256;v++){ acc+=hist[v]; if(acc>=n/2){ med=v; break; } }
+    for(let v=0;v<256;v++){ const d=v-med; if(d>40) light+=hist[v]*d; else if(d<-40) dark+=hist[v]*(-d); }
+  }
+  return light>dark*1.2;
+}
+/* read the 81 cells from the straightened grid */
+function ocrWarped(wg,S,invert){
+  let img=wg;
+  if(invert){ img=new Uint8ClampedArray(wg.length); for(let i=0;i<wg.length;i++) img[i]=255-wg[i]; }
+  const ink=CV.adaptive(CV.blur3(img,S,S),S,S,25,3);
   const cs=S/9, m=Math.round(cs*0.11), digits=new Array(81).fill(0), confs=new Array(81).fill(0), info=[];
   for(let r=0;r<9;r++) for(let c=0;c<9;c++){
     const x0=Math.round(c*cs)+m, y0=Math.round(r*cs)+m, x1=Math.round((c+1)*cs)-m, y1=Math.round((r+1)*cs)-m, cw=x1-x0, ch=y1-y0;
@@ -722,12 +736,38 @@ function readGrid(img){
     const fill=inkPx/((ux1-ux0+1)*(uy1-uy0+1));
     if(fill<0.27||fill>0.9) continue;
     const res=classify(normalizeMask(mask,cw,ux0,uy0,ux1,uy1));
-    info.push({r,c,digit:res.digit,conf:res.conf,d1:res.d1,bw:ux1-ux0+1,bh:uy1-uy0+1,fill,cw,ch,ux0,uy0});
+    info.push({r,c,digit:res.digit,conf:res.conf,d1:res.d1,bw:ux1-ux0+1,bh:uy1-uy0+1,fill});
     if(res.conf>=CONF_CELL){ digits[r*9+c]=res.digit; confs[r*9+c]=res.conf; }
   }
   const found=digits.filter(Boolean).length;
   let conf=0; if(found){ let s=0; for(let i=0;i<81;i++) if(digits[i]) s+=confs[i]; conf=s/found; }
-  return {ok:true,digits,conf,found,ms:performance.now()-t0,avg,info};
+  return {ok:true,digits,conf,found,info,inverted:!!invert};
+}
+const scoreOf=r=>r.ok?r.found*r.conf:-1;
+function readGrid(img){
+  const t0=performance.now(), w=img.width, h=img.height;
+  let g=CV.gray(img);
+  const avg=CV.mean(g);
+  if(avg<80){ for(let i=0;i<g.length;i++){ const v=g[i]*1.3+40; g[i]=v>255?255:v; } }     // low light boost
+  g=CV.blur3(g,w,h);
+  g=CV.clahe(g,w,h,2.0,8);
+  const S=SIZE;
+  function attempt(src){
+    const H=CV.homography([[0,0],[S,0],[S,S],[0,S]],src), wg=CV.warp(g,w,h,H,S), light=digitsAreLight(wg,S);
+    let r=ocrWarped(wg,S,light);
+    if(r.found<8||r.conf<CONF_LOW){ const alt=ocrWarped(wg,S,!light); if(scoreOf(alt)>scoreOf(r)) r=alt; }
+    return r;
+  }
+  let best=null;
+  for(const mode of [true,false]){
+    const src=findGrid(g,w,h,mode); if(!src) continue;
+    const r=attempt(src);
+    if(!best||scoreOf(r)>scoreOf(best)) best=r;
+    if(best.found>=8&&best.conf>=CONF_LOW) break;
+  }
+  if(!best) return {ok:false,reason:'grid',ms:performance.now()-t0,avg};
+  best.ms=performance.now()-t0; best.avg=avg;
+  return best;
 }
 window.__sudokuScan={readGrid,buildTemplates};
 
