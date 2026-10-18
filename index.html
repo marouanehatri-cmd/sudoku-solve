@@ -41,9 +41,9 @@ button{font:inherit;color:inherit;cursor:pointer;border:1.5px solid var(--btnlin
 button:focus-visible,.cell:focus-visible{outline:3px solid var(--solved);outline-offset:2px}
 .ibtn{width:44px;height:44px;padding:0;font-size:1.3rem;display:flex;align-items:center;justify-content:center}
 
-#board{display:grid;grid-template-columns:repeat(9,1fr);width:100%;aspect-ratio:1;background:var(--cell);
+#board{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));grid-template-rows:repeat(9,minmax(0,1fr));width:100%;aspect-ratio:1/1;background:var(--cell);
   border:3px solid var(--gridthick);border-radius:8px;overflow:hidden;touch-action:manipulation;user-select:none;-webkit-user-select:none}
-.cell{display:flex;align-items:center;justify-content:center;font-size:clamp(18px,6.4vw,28px);font-weight:400;
+.cell{min-width:0;min-height:0;overflow:hidden;line-height:1;padding:0;display:flex;align-items:center;justify-content:center;font-size:clamp(18px,6.4vw,28px);font-weight:400;
   border-right:1px solid var(--grid);border-bottom:1px solid var(--grid);cursor:pointer;color:var(--given);background:var(--cell)}
 .cell:nth-child(9n){border-right:none}
 .cell:nth-child(n+73){border-bottom:none}
